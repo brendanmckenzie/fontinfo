@@ -13,7 +13,13 @@ A command-line tool for displaying detailed information about TrueType and OpenT
 
 ## Installation
 
-Requires Rust toolchain. Install with:
+Requires Rust toolchain. Install directly from GitHub:
+
+```bash
+cargo install --git https://github.com/brendanmckenzie/fontinfo
+```
+
+Or install from a local clone:
 
 ```bash
 cargo install --path .
