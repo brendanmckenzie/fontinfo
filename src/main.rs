@@ -6,13 +6,15 @@ use ttf_parser::Face;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() != 2 {
-        eprintln!("Usage: {} <font-file>", args[0]);
-        eprintln!("Example: {} /path/to/font.ttf", args[0]);
-        process::exit(1);
-    }
-
-    let font_path = &args[1];
+    let (json_mode, font_path) = match args.len() {
+        2 => (false, &args[1]),
+        3 if args[1] == "--json" => (true, &args[2]),
+        _ => {
+            eprintln!("Usage: {} [--json] <font-file>", args[0]);
+            eprintln!("Example: {} /path/to/font.ttf", args[0]);
+            process::exit(1);
+        }
+    };
 
     let font_data = match fs::read(font_path) {
         Ok(data) => data,
@@ -30,7 +32,11 @@ fn main() {
         }
     };
 
-    print_font_info(&face, font_path);
+    if json_mode {
+        print_font_info_json(&face, font_path);
+    } else {
+        print_font_info(&face, font_path);
+    }
 }
 
 fn get_name(face: &Face, name_id: u16) -> Option<String> {
@@ -38,6 +44,143 @@ fn get_name(face: &Face, name_id: u16) -> Option<String> {
         .into_iter()
         .filter(|n| n.name_id == name_id)
         .find_map(|n| n.to_string())
+}
+
+fn collect_features(face: &Face) -> (Vec<String>, Vec<String>) {
+    let mut gsub_features = Vec::new();
+    let mut gpos_features = Vec::new();
+
+    if let Some(gsub) = face.tables().gsub {
+        for script in gsub.scripts {
+            for lang_sys in script.languages {
+                for feature_index in lang_sys.feature_indices {
+                    if let Some(feature) = gsub.features.get(feature_index) {
+                        let tag = feature.tag.to_string();
+                        if !gsub_features.contains(&tag) {
+                            gsub_features.push(tag);
+                        }
+                    }
+                }
+            }
+            if let Some(default_lang) = script.default_language {
+                for feature_index in default_lang.feature_indices {
+                    if let Some(feature) = gsub.features.get(feature_index) {
+                        let tag = feature.tag.to_string();
+                        if !gsub_features.contains(&tag) {
+                            gsub_features.push(tag);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(gpos) = face.tables().gpos {
+        for script in gpos.scripts {
+            for lang_sys in script.languages {
+                for feature_index in lang_sys.feature_indices {
+                    if let Some(feature) = gpos.features.get(feature_index) {
+                        let tag = feature.tag.to_string();
+                        if !gpos_features.contains(&tag) {
+                            gpos_features.push(tag);
+                        }
+                    }
+                }
+            }
+            if let Some(default_lang) = script.default_language {
+                for feature_index in default_lang.feature_indices {
+                    if let Some(feature) = gpos.features.get(feature_index) {
+                        let tag = feature.tag.to_string();
+                        if !gpos_features.contains(&tag) {
+                            gpos_features.push(tag);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    gsub_features.sort();
+    gpos_features.sort();
+    (gsub_features, gpos_features)
+}
+
+fn collect_scripts(face: &Face) -> Vec<String> {
+    let mut scripts = Vec::new();
+
+    if let Some(gsub) = face.tables().gsub {
+        for script in gsub.scripts {
+            let tag = script.tag.to_string();
+            if !scripts.contains(&tag) {
+                scripts.push(tag);
+            }
+        }
+    }
+    if let Some(gpos) = face.tables().gpos {
+        for script in gpos.scripts {
+            let tag = script.tag.to_string();
+            if !scripts.contains(&tag) {
+                scripts.push(tag);
+            }
+        }
+    }
+
+    scripts.sort();
+    scripts
+}
+
+fn print_font_info_json(face: &Face, path: &str) {
+    let (gsub_features, gpos_features) = collect_features(face);
+    let scripts = collect_scripts(face);
+
+    let gsub_json: Vec<serde_json::Value> = gsub_features
+        .iter()
+        .map(|tag| {
+            serde_json::json!({
+                "tag": tag,
+                "description": describe_opentype_feature(tag)
+            })
+        })
+        .collect();
+
+    let gpos_json: Vec<serde_json::Value> = gpos_features
+        .iter()
+        .map(|tag| {
+            serde_json::json!({
+                "tag": tag,
+                "description": describe_opentype_feature(tag)
+            })
+        })
+        .collect();
+
+    let output = serde_json::json!({
+        "file": path,
+        "names": {
+            "family": get_name(face, ttf_parser::name_id::FAMILY),
+            "subfamily": get_name(face, ttf_parser::name_id::SUBFAMILY),
+            "full_name": get_name(face, ttf_parser::name_id::FULL_NAME),
+            "postscript_name": get_name(face, ttf_parser::name_id::POST_SCRIPT_NAME),
+            "version": get_name(face, 5),
+        },
+        "metrics": {
+            "units_per_em": face.units_per_em(),
+            "ascender": face.ascender(),
+            "descender": face.descender(),
+            "line_gap": face.line_gap(),
+            "glyph_count": face.number_of_glyphs(),
+            "is_monospaced": face.is_monospaced(),
+            "is_bold": face.is_bold(),
+            "is_italic": face.is_italic(),
+            "is_oblique": face.is_oblique(),
+            "weight": face.weight().to_number(),
+            "width": format!("{:?}", face.width()),
+        },
+        "gsub_features": gsub_json,
+        "gpos_features": gpos_json,
+        "scripts": scripts,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }
 
 fn print_font_info(face: &Face, path: &str) {
@@ -110,38 +253,11 @@ fn print_font_info(face: &Face, path: &str) {
 
     // OpenType features (GSUB - Glyph Substitution)
     println!("┌─ OPENTYPE FEATURES (GSUB - Glyph Substitution) ───────────────");
-    let mut gsub_features = Vec::new();
-
-    if let Some(gsub) = face.tables().gsub {
-        for script in gsub.scripts {
-            for lang_sys in script.languages {
-                for feature_index in lang_sys.feature_indices {
-                    if let Some(feature) = gsub.features.get(feature_index) {
-                        let tag = feature.tag.to_string();
-                        if !gsub_features.contains(&tag) {
-                            gsub_features.push(tag);
-                        }
-                    }
-                }
-            }
-
-            if let Some(default_lang) = script.default_language {
-                for feature_index in default_lang.feature_indices {
-                    if let Some(feature) = gsub.features.get(feature_index) {
-                        let tag = feature.tag.to_string();
-                        if !gsub_features.contains(&tag) {
-                            gsub_features.push(tag);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let (gsub_features, gpos_features) = collect_features(face);
 
     if gsub_features.is_empty() {
         println!("│ No GSUB features found");
     } else {
-        gsub_features.sort();
         for (i, feature) in gsub_features.iter().enumerate() {
             let prefix = if i == 0 { "│ Features:" } else { "│          " };
             println!("{} {} - {}", prefix, feature, describe_opentype_feature(feature));
@@ -152,38 +268,10 @@ fn print_font_info(face: &Face, path: &str) {
 
     // OpenType features (GPOS - Glyph Positioning)
     println!("┌─ OPENTYPE FEATURES (GPOS - Glyph Positioning) ────────────────");
-    let mut gpos_features = Vec::new();
-
-    if let Some(gpos) = face.tables().gpos {
-        for script in gpos.scripts {
-            for lang_sys in script.languages {
-                for feature_index in lang_sys.feature_indices {
-                    if let Some(feature) = gpos.features.get(feature_index) {
-                        let tag = feature.tag.to_string();
-                        if !gpos_features.contains(&tag) {
-                            gpos_features.push(tag);
-                        }
-                    }
-                }
-            }
-
-            if let Some(default_lang) = script.default_language {
-                for feature_index in default_lang.feature_indices {
-                    if let Some(feature) = gpos.features.get(feature_index) {
-                        let tag = feature.tag.to_string();
-                        if !gpos_features.contains(&tag) {
-                            gpos_features.push(tag);
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     if gpos_features.is_empty() {
         println!("│ No GPOS features found");
     } else {
-        gpos_features.sort();
         for (i, feature) in gpos_features.iter().enumerate() {
             let prefix = if i == 0 { "│ Features:" } else { "│          " };
             println!("{} {} - {}", prefix, feature, describe_opentype_feature(feature));
@@ -194,30 +282,11 @@ fn print_font_info(face: &Face, path: &str) {
 
     // Scripts supported
     println!("┌─ SUPPORTED SCRIPTS ───────────────────────────────────────────");
-    let mut scripts = Vec::new();
-
-    if let Some(gsub) = face.tables().gsub {
-        for script in gsub.scripts {
-            let tag = script.tag.to_string();
-            if !scripts.contains(&tag) {
-                scripts.push(tag);
-            }
-        }
-    }
-
-    if let Some(gpos) = face.tables().gpos {
-        for script in gpos.scripts {
-            let tag = script.tag.to_string();
-            if !scripts.contains(&tag) {
-                scripts.push(tag);
-            }
-        }
-    }
+    let scripts = collect_scripts(face);
 
     if scripts.is_empty() {
         println!("│ No script information found");
     } else {
-        scripts.sort();
         for (i, script) in scripts.iter().enumerate() {
             let prefix = if i == 0 { "│ Scripts:" } else { "│         " };
             println!("{} {}", prefix, script);
